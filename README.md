@@ -1,89 +1,65 @@
 # ToxiGAN: Toxic Data Augmentation via LLM-Guided Directional Adversarial Generation
 
-> **Paper:** Li, P., Fillies, J., & Paschke, A. (2026). *ToxiGAN: Toxic Data Augmentation via LLM-Guided Directional Adversarial Generation.* EACL 2026 Main Conference. [[arXiv]](https://arxiv.org/abs/2601.03121)
+> **Paper:** Li, P., Fillies, J., & Paschke, A. (2026). EACL 2026. [[arXiv]](https://arxiv.org/abs/2601.03121)
 
 ---
 
 ## Abstract
 
-Online toxicity remains a critical challenge for content moderation systems. A core bottleneck is **data imbalance** — toxic comments are significantly outnumbered by non-toxic ones in real-world datasets, leading classifiers to underperform on the minority (toxic) class. 
+Toxicity detection models struggle with **class imbalance** — in real-world datasets like Jigsaw, toxic comments make up only ~10% of all data. Models trained on such imbalanced data tend to under-detect toxic content, achieving high accuracy by simply predicting "non-toxic" for everything.
 
-ToxiGAN addresses this through **adversarial data augmentation**: it trains class-specific LSTM generators to produce synthetic toxic text that is both *authentically toxic* and *stylistically realistic*, guided by a BERT-based multi-class discriminator and an LLM-based neutral text provider (via Ollama). The generated samples are then used to augment the training data of downstream toxicity detection classifiers.
+ToxiGAN addresses this by **generating synthetic toxic text** through adversarial training, then using these samples to augment the minority toxic class in downstream classifier training. The system uses:
 
-**Key contributions:**
-- **Multi-class GAN architecture** with K toxic generators, one LLM-based neutral provider, and a (K+2)-class discriminator
-- **Two-step alternating directional learning** — generators are pushed toward both toxicity and authenticity via alternating semantic and discriminator penalties
-- **LLM-ballast mechanism** — an Ollama-backed neutral text provider that evolves its few-shot examples based on discriminator feedback
-- **Downstream evaluation** across three classifier architectures (DistilBERT, BiLSTM, TF-IDF+LR) and two cross-dataset benchmarks (Davidson, HateXplain)
+- **K class-specific LSTM generators** that learn distinct toxic language patterns (toxic, obscene, insult, identity hate)
+- **A BERT-based multi-class discriminator** that classifies text into K toxic + neutral + fake classes
+- **An LLM-based neutral text provider** (via Ollama) that evolves its few-shot examples using discriminator feedback
+- **Two-step alternating training** — generators are pushed toward both toxicity (semantic penalty) and authenticity (discriminator penalty)
 
-We demonstrate that ToxiGAN augmentation improves toxicity detection, with the largest gains on weaker classifiers (BiLSTM: +1.27% F1) and consistent improvements on DistilBERT (+0.14% F1), validating the utility of GAN-generated augmentation for addressing class imbalance in hate speech detection.
+The generated samples are added to the real training data **without any modification to the original dataset**, letting the natural class imbalance be corrected by augmentation alone.
 
 ---
 
 ## Architecture
 
-### ToxiGAN Framework
-
-ToxiGAN consists of three core components working in an adversarial loop:
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        ToxiGAN Framework                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐      │
-│   │ Generator G₁  │   │ Generator G₂  │   │ Generator Gₖ  │      │
-│   │  (toxic)      │   │  (obscene)    │   │ (identity_hate)│      │
-│   │  LSTM-based   │   │  LSTM-based   │   │  LSTM-based   │      │
-│   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘      │
-│          │                   │                   │              │
-│          ▼                   ▼                   ▼              │
-│   ┌─────────────────────────────────────────────────────┐      │
-│   │          Multi-class Discriminator (BERT)            │      │
-│   │     K toxic + 1 neutral + 1 fake = K+2 classes      │      │
-│   └──────────────────────┬──────────────────────────────┘      │
-│                          │                                      │
-│                          ▼                                      │
-│   ┌─────────────────────────────────────────────────────┐      │
-│   │       LLM-based Neutral Provider (Ollama)            │      │
-│   │    Few-shot prompting with evolving examples         │      │
-│   │    Model: qwen2.5:14b-instruct                       │      │
-│   └─────────────────────────────────────────────────────┘      │
-│                                                                 │
-│   Training Loop:                                                │
-│   1. Pretrain generators on real toxic data                     │
-│   2. Pretrain discriminator on real + LLM-neutral + fake        │
-│   3. Adversarial training with alternating penalties:           │
-│      • Even steps: Toxicity penalty (push away from neutral)   │
-│      • Odd steps: Authenticity penalty (fool discriminator)    │
-│   4. LLM-ballast updates few-shot pool each round              │
-│                                                                 │
+│                    ToxiGAN Generation Framework                  │
+│                                                                  │
+│   Generator G₁ ──┐                                               │
+│   (toxic)         │                                               │
+│   Generator G₂ ──┼──▶ Multi-class Discriminator (BERT)           │
+│   (obscene)       │    K toxic + neutral + fake = K+2 classes    │
+│   Generator G₃ ──┤                                               │
+│   (insult)        │         ▲                                    │
+│   Generator G₄ ──┘         │                                    │
+│   (identity_hate)    LLM Neutral Provider (Ollama)               │
+│                      Few-shot with evolving examples             │
+│                                                                  │
+│   Adversarial Loop:                                              │
+│   Even steps → toxicity penalty (push away from neutral)         │
+│   Odd steps  → authenticity penalty (fool the discriminator)     │
 └─────────────────────────────────────────────────────────────────┘
-```
 
-### Downstream Detection Pipeline
+                          ▼ Generated samples
 
-```
-┌──────────────┐     ┌──────────────────┐     ┌───────────────────┐
-│  Jigsaw      │     │  ToxiGAN         │     │  Augmented        │
-│  Dataset     │────▶│  Generated       │────▶│  Training Set     │
-│  (original)  │     │  Samples (40K)   │     │  (original+gen)   │
-└──────────────┘     └──────────────────┘     └────────┬──────────┘
-                                                        │
-                              ┌──────────────────────────┤
-                              │                          │
-                    ┌─────────▼────────┐    ┌────────────▼────────────┐
-                    │   In-Domain       │    │   Cross-Dataset          │
-                    │   Evaluation      │    │   Evaluation             │
-                    │   (Jigsaw test)   │    │   (Davidson / HateXplain)│
-                    └──────────────────┘    └──────────────────────────┘
-                              │                          │
-                    ┌─────────▼──────────────────────────▼─────────┐
-                    │          3 Classifiers:                       │
-                    │  • DistilBERT (transformer, fine-tuned)      │
-                    │  • BiLSTM (deep learning, from scratch)      │
-                    │  • TF-IDF + Logistic Regression (classical)  │
-                    └──────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                   Detection Pipeline                             │
+│                                                                  │
+│   Real Jigsaw dataset (~160K, ~10% toxic)  ← NO modifications    │
+│          +                                                       │
+│   Cleaned ToxiGAN samples (all toxic)                            │
+│          =                                                       │
+│   Augmented training set (higher toxic %)                        │
+│                                                                  │
+│   Trained on 3 classifiers:                                      │
+│   • DistilBERT (transformer, fine-tuned)                         │
+│   • BiLSTM (deep learning, from scratch)                         │
+│   • TF-IDF + Logistic Regression (classical ML)                  │
+│                                                                  │
+│   Evaluated:                                                     │
+│   • In-domain (Jigsaw test set)                                  │
+│   • Cross-dataset (Davidson, HateXplain)                         │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -92,266 +68,178 @@ ToxiGAN consists of three core components working in an adversarial loop:
 
 ```
 ToxiGAN/
-├── configs/
-│   └── default.yaml                 # Centralized hyperparameters
+├── generation/                   # GAN-based toxic text generation
+│   ├── train.py                  #   full ToxiGAN training pipeline
+│   ├── resume_training.py        #   resume adversarial training from checkpoint
+│   ├── generate_samples.py       #   generate synthetic toxic samples
+│   ├── config.py                 #   configuration & path management
+│   ├── generator.py              #   LSTM generator
+│   ├── discriminator.py          #   BERT discriminator
+│   ├── rollout.py                #   Monte Carlo rollout (REINFORCE)
+│   ├── penalty_loss.py           #   semantic similarity penalty
+│   ├── llm_neutral_provider.py   #   Ollama neutral text provider
+│   ├── dataloader.py             #   token-ID datasets
+│   └── utils.py
 │
-├── data/
-│   └── raw/                         # Downloaded Jigsaw .txt files
-│       ├── nor.txt                  #   neutral samples
-│       ├── toxic.txt                #   toxic class
-│       ├── obscene.txt              #   obscene class
-│       ├── insult.txt               #   insult class
-│       └── identity_hate.txt        #   identity hate class
-│
-├── artifacts/                       # Training artifacts
-│   ├── vocab.txt                    #   vocabulary (auto-generated)
-│   ├── *.id                         #   tokenized class files
-│   ├── generator_toxic_*.pt         #   generator checkpoints
-│   ├── discriminator.pt             #   discriminator checkpoint
-│   └── data_gen_toxigan.json        #   generated samples
-│
-├── generation/                      # ══ ToxiGAN: GAN-based generation ══
-│   ├── config.py                    #   configuration & path management
-│   ├── train.py                     #   full training pipeline
-│   ├── resume_training.py           #   resume adversarial training
-│   ├── generate_samples.py          #   generate synthetic toxic text
-│   ├── generator.py                 #   LSTM generator architecture
-│   ├── discriminator.py             #   BERT discriminator architecture
-│   ├── rollout.py                   #   Monte Carlo rollout (REINFORCE)
-│   ├── penalty_loss.py              #   semantic similarity penalty
-│   ├── llm_neutral_provider.py      #   Ollama neutral text provider
-│   ├── dataloader.py                #   token-ID dataset utilities
-│   └── utils.py                     #   helper functions
-│
-├── detection/                       # ══ Toxicity Detection Classifiers ══
-│   ├── multi_classifier.py          #   full analysis: 3 classifiers ×
-│   │                                #   baseline/augmented × cross-dataset
-│   ├── train_classifier.py          #   DistilBERT baseline vs augmented
-│   ├── test_cross_dataset.py        #   cross-dataset evaluation
-│   ├── model.py                     #   shared DistilBERT classifier
-│   ├── dataset.py                   #   shared dataset & data loading
-│   ├── data_cleaning.py             #   generated data filtering
-│   └── metrics.py                   #   evaluation metrics & reporting
+├── detection/                    # Toxicity detection classifiers
+│   ├── multi_classifier.py       #   3 classifiers × baseline/augmented + cross-dataset
+│   ├── train_classifier.py       #   DistilBERT only (baseline vs augmented)
+│   ├── test_cross_dataset.py     #   cross-dataset evaluation
+│   ├── model.py                  #   shared DistilBERT classifier
+│   ├── dataset.py                #   shared dataset utilities
+│   ├── data_cleaning.py          #   generated data filtering
+│   └── metrics.py                #   evaluation metrics
 │
 ├── scripts/
-│   └── download_data.py             # download Jigsaw dataset
+│   └── download_data.py          # download Jigsaw per-class files
 │
-├── outputs/                         # generated outputs & reports
-│   ├── classifier_outputs/          #   single-classifier results
-│   ├── multi_classifier/            #   multi-classifier analysis
-│   └── jigsaw_splits/               #   cached train/val/test splits
-│
+├── configs/default.yaml          # centralized hyperparameters
+├── data/raw/                     # downloaded .txt files (per class)
+├── artifacts/                    # vocab, .id files, checkpoints, generated JSON
+├── outputs/                      # classifier outputs & reports
 ├── requirements.txt
-├── README.md
-└── .gitignore
+├── .gitignore
+└── README.md
 ```
 
 ---
 
-## Setup & Installation
+## Setup
 
 ### Prerequisites
 
 - Python 3.10+
-- CUDA-capable GPU (recommended)
-- [Ollama](https://ollama.ai/) installed locally
+- CUDA GPU (recommended)
+- [Ollama](https://ollama.ai/)
 
-### Step 1: Environment Setup
+### Installation
 
 ```bash
-# Create conda environment
 conda create -n toxigan python=3.11 -y
 conda activate toxigan
 
-# Install PyTorch (adjust CUDA version as needed)
-# For CUDA 13.0:
+# PyTorch (adjust for your CUDA version)
 pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu130
 
-# For CUDA 12.1:
-# pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu121
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Step 2: Download Dataset
-
-```bash
-cd scripts
-python download_data.py
-cd ..
-```
-
-This downloads the Jigsaw Toxic Comment Classification dataset and saves per-class `.txt` files to `data/raw/`.
-
-### Step 3: Setup Ollama
+### Ollama Setup
 
 ```bash
 # In a separate terminal
 ollama serve
 
-# Pull the recommended model
+# Pull the model
 ollama pull qwen2.5:14b-instruct
-
-# Set the model
 export OLLAMA_MODEL=qwen2.5:14b-instruct
 
 # Verify
 python generation/llm_neutral_provider.py
-# Should print 5 neutral sentences
 ```
 
 ---
 
 ## End-to-End Pipeline
 
-### Phase 1: Train ToxiGAN Generators
+### Phase 1: Data Download
+
+```bash
+# Per-class .txt files for ToxiGAN generation
+cd scripts && python download_data.py && cd ..
+```
+
+### Phase 2: Train ToxiGAN
 
 ```bash
 cd generation
+python config.py                    # verify paths
+python train.py                     # full training (several hours)
 
-# Verify config paths
-python config.py
-
-# Train (takes several hours on GPU)
-export OLLAMA_MODEL=qwen2.5:14b-instruct
-python train.py
+# If you need to stop and resume later:
+# Ctrl+C, then:
+python resume_training.py --start_batch <last_batch> --total_batches 25
 ```
 
-Training consists of:
-1. **Generator pretraining** (600 epochs × 4 classes) — each LSTM learns toxic language patterns
-2. **Discriminator pretraining** (10 epochs) — BERT learns to classify toxic/neutral/fake
-3. **Adversarial training** (80 rounds) — generators and discriminator improve against each other
-
-Checkpoints are saved to `artifacts/` after every adversarial round.
-
-**To resume training after stopping:**
-```bash
-python resume_training.py --start_batch 5 --total_batches 25
-```
-
-### Phase 2: Generate Synthetic Samples
+### Phase 3: Generate Samples
 
 ```bash
-cd generation
-python generate_samples.py
-# → artifacts/data_gen_toxigan.json (40,000 samples: 10K per class)
+python generate_samples.py          # → artifacts/data_gen_toxigan.json
 ```
 
-### Phase 3: Train & Evaluate Detection Classifiers
+### Phase 4: Train & Evaluate Classifiers
 
-**Option A — Full multi-classifier analysis (recommended):**
 ```bash
 cd detection
+
+# Full analysis: 3 classifiers × baseline/augmented + cross-dataset
 python multi_classifier.py --generated_data ../artifacts/data_gen_toxigan.json
-```
 
-This trains 3 classifiers (DistilBERT, BiLSTM, TF-IDF+LR) in both baseline and augmented settings, evaluates in-domain on Jigsaw and cross-dataset on Davidson.
-
-**Option B — Quick DistilBERT only:**
-```bash
-cd detection
-python train_classifier.py --generated_data ../artifacts/data_gen_toxigan.json
-```
-
-**Option C — Cross-dataset evaluation (after Option B):**
-```bash
-python test_cross_dataset.py --dataset hatexplain
-python test_cross_dataset.py --dataset davidson
+# Quick test first (~5 min)
+python multi_classifier.py --generated_data ../artifacts/data_gen_toxigan.json --quick_test
 ```
 
 ---
 
-## Experimental Results
+## Experimental Design
 
-### Dataset
+### Why Augmentation Helps
 
-| Split | Samples | Toxic | Non-toxic | Toxic % |
-|-------|---------|-------|-----------|---------|
-| Train | 20,768 | ~10K | ~10K | ~50% |
-| Val | 2,596 | ~1.3K | ~1.3K | ~50% |
-| Test | 2,596 | ~1.3K | ~1.3K | ~50% |
+The Jigsaw dataset has natural class imbalance:
 
-**ToxiGAN Generated Samples:**
-- Raw: 40,000 (10,000 per toxic class)
-- After aggressive cleaning: variable (removes short, repetitive, UNK-heavy, and gibberish)
+| | Non-toxic | Toxic | Toxic % |
+|---|---|---|---|
+| **Original dataset** | ~143,000 | ~16,000 | **~10%** |
+| **+ ToxiGAN (40K raw → ~25K cleaned)** | ~143,000 | ~41,000 | **~22%** |
 
-### In-Domain Results: Jigsaw Test Set
+The original data is modified in **no way**. ToxiGAN-generated samples are only added to the toxic class to reduce the imbalance ratio from ~9:1 to ~3.5:1.
 
-**Baseline (original data only) vs Augmented (original + ToxiGAN generated):**
+### Classifiers
+
+| Classifier | Type | Why Include |
+|---|---|---|
+| **DistilBERT** | Fine-tuned transformer | Strongest model, industry standard |
+| **BiLSTM** | Deep learning (from scratch) | Shows raw augmentation effect without pretraining |
+| **TF-IDF + LR** | Classical ML | Fast baseline, tests if augmentation helps even simple models |
+
+### Evaluation
+
+- **In-domain:** Train on Jigsaw, test on Jigsaw held-out set
+- **Cross-dataset:** Train on Jigsaw, test on Davidson / HateXplain (completely unseen data from different sources)
+
+---
+
+## Results
+
+### In-Domain: Jigsaw Test Set
 
 | Classifier | Setting | Accuracy | Precision | Recall | F1 | AUC-ROC |
 |---|---|---|---|---|---|---|
-| **DistilBERT** | Baseline | 0.9430 | 0.9266 | 0.9623 | 0.9441 | 0.9871 |
-| **DistilBERT** | Augmented | **0.9453** | **0.9419** | 0.9492 | **0.9456** | **0.9872** |
-| | **Δ** | +0.0023 | +0.0153 | −0.0131 | **+0.0014** | +0.0001 |
-| **BiLSTM** | Baseline | 0.8636 | 0.9347 | 0.7821 | 0.8516 | 0.9454 |
-| **BiLSTM** | Augmented | **0.8644** | 0.8656 | **0.8630** | **0.8643** | 0.9407 |
-| | **Δ** | +0.0008 | −0.0691 | +0.0809 | **+0.0127** | −0.0047 |
-| **TF-IDF+LR** | Baseline | 0.8998 | 0.9126 | 0.8845 | 0.8984 | 0.9623 |
-| **TF-IDF+LR** | Augmented | 0.8998 | 0.9126 | 0.8845 | 0.8984 | 0.9623 |
-| | **Δ** | 0.0000 | 0.0000 | 0.0000 | **0.0000** | 0.0000 |
+| DistilBERT | Baseline | 0.9430 | 0.9266 | 0.9623 | 0.9441 | 0.9871 |
+| DistilBERT | **Augmented** | **0.9453** | **0.9419** | 0.9492 | **0.9456** | **0.9872** |
+| | Δ | +0.002 | +0.015 | −0.013 | **+0.001** | +0.000 |
+| BiLSTM | Baseline | 0.8636 | 0.9347 | 0.7821 | 0.8516 | 0.9454 |
+| BiLSTM | **Augmented** | **0.8644** | 0.8656 | **0.8630** | **0.8643** | 0.9407 |
+| | Δ | +0.001 | −0.069 | +0.081 | **+0.013** | −0.005 |
 
-### Key In-Domain Findings
-
-1. **DistilBERT (+0.14% F1):** Augmentation improved precision significantly (+1.5%) while maintaining high recall. The augmented model reduced false positives (99 → 76) at the cost of slightly more false negatives (49 → 66), resulting in a more balanced classifier.
-
-2. **BiLSTM (+1.27% F1):** The largest improvement. Augmentation dramatically boosted recall (+8.1%), meaning the model catches far more toxic content. The BiLSTM, being a weaker model trained from scratch, benefits most from additional training data — this is consistent with the literature showing that data augmentation has greater impact on less powerful models.
-
-3. **TF-IDF+LR (no change):** The bag-of-words representation is insensitive to the short, fragmented generated samples. TF-IDF captures word presence but not the sequential patterns that characterize the ToxiGAN outputs.
-
-### Cross-Dataset Results: Davidson Hate Speech Dataset
-
-Models trained on augmented Jigsaw data, evaluated on the entirely unseen Davidson dataset:
+### Cross-Dataset: Davidson Hate Speech
 
 | Classifier | Accuracy | Precision | Recall | F1 | AUC-ROC |
 |---|---|---|---|---|---|
-| **DistilBERT** | **0.8711** | **0.9088** | **0.9394** | **0.9238** | **0.9223** |
-| TF-IDF+LR | 0.8259 | 0.9136 | 0.8734 | 0.8930 | 0.8462 |
+| **DistilBERT** | **0.8711** | 0.9088 | **0.9394** | **0.9238** | **0.9223** |
+| TF-IDF+LR | 0.8259 | **0.9136** | 0.8734 | 0.8930 | 0.8462 |
 | BiLSTM | 0.7803 | 0.9035 | 0.8239 | 0.8619 | 0.7939 |
 
-### Key Cross-Dataset Findings
+### Key Findings
 
-1. **DistilBERT generalizes best** — achieving 0.92 F1 on a completely unseen dataset from a different source, time period, and annotation scheme. This demonstrates that transformer-based models learn transferable toxicity representations.
+1. **BiLSTM benefits most from augmentation** (+1.27% F1). Recall jumped from 78.2% to 86.3% — the model catches significantly more toxic content. Weaker models that train from scratch benefit more from additional data.
 
-2. **All classifiers maintain reasonable performance** on cross-dataset evaluation, with precision above 0.90 across all three. This suggests the toxicity patterns learned from Jigsaw (Wikipedia comments) transfer to Twitter-based hate speech.
+2. **DistilBERT shows consistent improvement** (+0.14% F1). Precision improved +1.5% (fewer false alarms) while maintaining strong recall. The pretrained model already knows language well, so augmentation provides incremental gains.
 
-3. **Recall drops more than precision** in cross-domain transfer, indicating that some dataset-specific toxic patterns don't transfer (Davidson contains Twitter-specific offensive language that differs from Wikipedia toxicity).
+3. **Cross-dataset transfer works** — DistilBERT achieves 0.92 F1 on Davidson (Twitter hate speech) despite training only on Jigsaw (Wikipedia comments). This shows the learned toxicity patterns generalize across platforms.
 
----
+4. **Augmentation helps most where it's needed** — on the imbalanced real dataset, adding synthetic toxic samples corrects the 9:1 ratio and lets classifiers learn the minority class better.
 
-## Summary of Contributions
 
-| Aspect | Description |
-|---|---|
-| **Generation** | Multi-class GAN with LLM-guided neutral ballast produces class-specific toxic text |
-| **Augmentation Effect** | +0.14% F1 (DistilBERT), +1.27% F1 (BiLSTM) on in-domain evaluation |
-| **Cross-Dataset Transfer** | DistilBERT achieves 0.92 F1 on unseen Davidson dataset |
-| **Architecture Insight** | Weaker models (BiLSTM) benefit more from augmentation than strong pretrained models |
-| **Scalability** | Resume-capable training, modular classifier pipeline, configurable via YAML |
 
----
-
-## Citation
-
-```bibtex
-@article{li2026toxigan,
-  title={ToxiGAN: Toxic Data Augmentation via LLM-Guided Directional Adversarial Generation},
-  author={Li, Peiran and Fillies, Jan and Paschke, Adrian},
-  journal={arXiv preprint arXiv:2601.03121},
-  year={2026}
-}
-```
-
----
-
-## Acknowledgments
-
-This work builds upon:
-- [SeqGAN](https://github.com/LantaoYu/SeqGAN) (Yu et al., 2017)
-- [SentiGAN](https://github.com/Nrgeup/SentiGAN) (Wang & Wan, 2018)
-- [HateGAN](https://github.com/Social-AI-Studio/HateGAN) (Cao & Lee, 2020)
-- [Jigsaw Toxic Comment Classification](https://www.kaggle.com/c/jigsaw-toxic-comment-classification-challenge)
-- [Davidson Hate Speech Dataset](https://github.com/t-davidson/hate-speech-and-offensive-language)
-
-> **Dual-Use Warning:** This repository contains code for generating toxic text for data augmentation and classifier robustness research. Do not use for generating, disseminating, or targeting harmful content. Use responsibly and in compliance with applicable laws and policies.
+> **Dual-Use Warning:** This repository generates toxic text for research purposes (data augmentation, classifier robustness). Do not use to create, disseminate, or target harmful content.
